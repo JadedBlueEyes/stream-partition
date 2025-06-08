@@ -108,7 +108,6 @@ where
 /// This structure coordinates the distribution of items from the source stream to the
 /// appropriate partition streams. It maintains queues of pending items for each key
 /// and tracks the overall state of the partitioning operation.
-
 impl<St, Fut, F, K> PartitionBy<St, Fut, F, K>
 where
     St: Stream,
@@ -177,7 +176,6 @@ where
     }
 }
 
-
 impl<St, Fut, F, K> PartitionBy<St, Fut, F, K>
 where
     St: Stream,
@@ -186,7 +184,6 @@ where
     Fut: Future<Output = K>,
     K: Hash + Eq + Clone,
 {
-
     fn poll_item(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
         let mut this = self.project();
 
@@ -307,7 +304,6 @@ where
     }
 }
 
-
 /// Extension trait that adds partitioning functionality to any stream.
 ///
 /// This trait provides the `partition_by` method that can be called on any stream
@@ -362,7 +358,7 @@ impl<St: Stream> StreamPartitionExt for St {}
 mod tests {
     use std::time::Duration;
 
-    use futures::{future::join, stream, StreamExt};
+    use futures::{StreamExt, future::join, stream};
     use stream_throttle::{ThrottlePool, ThrottleRate, ThrottledStream};
 
     use super::*;
@@ -390,7 +386,7 @@ mod tests {
         assert_eq!(partition_stream.next().await.unwrap(), 3);
 
         while let Some(v) = partition_stream.next().await {
-        	assert!(v % 2 == 1, "Expected odd number, got {}", v);
+            assert!(v % 2 == 1, "Expected odd number, got {}", v);
         }
     }
 
@@ -427,7 +423,10 @@ mod tests {
             }
         });
 
-        if let Err(_) = tokio::time::timeout(Duration::from_millis(10), join(a, b)).await {
+        if tokio::time::timeout(Duration::from_millis(10), join(a, b))
+            .await
+            .is_err()
+        {
             println!("did not complete within 10 ms");
         }
         dbg!("complete");
