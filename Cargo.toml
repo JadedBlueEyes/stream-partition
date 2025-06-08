@@ -1,0 +1,14 @@
+[package]
+name = "stream-partition"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+futures = { version = "0.3.31", default-features = false, features = ["std"]}
+pin-project-lite = { version = "0.2.16", default-features = false }
+# pinarcmutex = "0.1.1"
+
+[dev-dependencies]
+tokio = { version = "1.45.1", features = ["full"]}
+
+stream_throttle = "0.5.1"
