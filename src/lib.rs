@@ -431,4 +431,41 @@ mod tests {
         }
         dbg!("complete");
     }
+
+    #[tokio::test]
+    async fn test_get_partition_single_task() {
+        use futures::future::ready;
+
+        let rate = ThrottleRate::new(2, Duration::new(0, 10));
+        let pool = ThrottlePool::new(rate);
+        let stream = stream::iter(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]).throttle(pool);
+        let partitioner = stream.partition_by(|x| ready(x % 2));
+
+        // Get the even numbers partition directly
+        let mut even_partition = partitioner.lock().unwrap().get_partition(0);
+        assert_eq!(even_partition.key, 0);
+        let mut odd_partition = partitioner.lock().unwrap().get_partition(1);
+        assert_eq!(odd_partition.key, 1);
+
+        let a = async move {
+            dbg!("a");
+            while let Some(v) = even_partition.next().await {
+                assert!(dbg!(v) % 2 == 0, "Expected even number, got {}", v);
+            }
+        };
+        let b = async move {
+            dbg!("b");
+            while let Some(v) = odd_partition.next().await {
+                assert!(dbg!(v) % 2 == 1, "Expected odd number, got {}", v);
+            }
+        };
+
+        if tokio::time::timeout(Duration::from_millis(10), join(a, b))
+            .await
+            .is_err()
+        {
+            println!("did not complete within 10 ms");
+        }
+        dbg!("complete");
+    }
 }
