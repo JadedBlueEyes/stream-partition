@@ -66,8 +66,6 @@ pin_project! {
 
         #[pin]
         stream_finished: bool,
-        // Parittions that have things listening
-        pending_groups: Vec<(K, Partitioned<St, Fut, F, K>)>,
 
         // Partitions waiting for items
         partition_wakers: HashMap<K, Vec<Waker>>,
@@ -134,7 +132,6 @@ where
             let me = me.clone();
             Mutex::new(Self {
                 me,
-                pending_groups: Vec::new(),
                 pending_items: HashMap::new(),
                 stream_finished: false,
                 stream,
@@ -148,6 +145,8 @@ where
 
     /// Gets a partition stream for a specific key.
     ///
+    /// **Must not be called with the same key twice**, otherwise items will be missed.
+    ///
     /// # Arguments
     ///
     /// * `key` - The key for which to get a partition stream
@@ -158,21 +157,12 @@ where
     pub fn get_partition(&mut self, key: K) -> Partitioned<St, Fut, F, K> {
         self.pending_items.entry(key.clone()).or_default();
 
-        // Check if we already have this partition tracked
-        if let Some((_, existing_partition)) = self.pending_groups.iter().find(|(k, _)| k == &key) {
-            return existing_partition.clone();
-        }
-
         // Create new partition
-        let partition = Partitioned {
+
+        Partitioned {
             key: key.clone(),
             shared_state: self.me.upgrade().unwrap(),
-        };
-
-        // Track this partition
-        self.pending_groups.push((key, partition.clone()));
-
-        partition
+        }
     }
 }
 
@@ -205,15 +195,6 @@ where
                             }
                         }
 
-                        // Ensure item is in the pre-existing streams
-                        if !this.pending_groups.iter().any(|(k, _)| k == &key) {
-                            let partition = Partitioned {
-                                key: key.clone(),
-                                shared_state: this.me.upgrade().unwrap(),
-                            };
-
-                            this.pending_groups.push((key.clone(), partition.clone()));
-                        }
                         if let Some(wakers) = this.partition_wakers.remove(&key) {
                             for waker in wakers {
                                 waker.wake_by_ref();
@@ -467,5 +448,35 @@ mod tests {
             println!("did not complete within 10 ms");
         }
         dbg!("complete");
+    }
+}
+
+#[cfg(test)]
+mod memory_tests {
+    // #[global_allocator]
+    // static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
+
+    use super::*;
+    use futures::{StreamExt, future::ready, stream};
+
+    #[tokio::test]
+    async fn test_memory_usage() {
+        for _ in 0..100 {
+            // Your partitioning code here
+            let stream = stream::iter(0..100_000);
+            let partitioner = stream.partition_by(|x| ready(x % 100));
+
+            // Consume all partitions
+            let mut handles = Vec::new();
+            for key in 0..100 {
+                let mut partition = partitioner.lock().unwrap().get_partition(key);
+                handles.push(tokio::spawn(async move {
+                    while (partition.next().await).is_some() {}
+                }));
+            }
+            for handle in handles {
+                handle.await.unwrap();
+            }
+        }
     }
 }
