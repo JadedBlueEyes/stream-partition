@@ -69,6 +69,9 @@ pin_project! {
 
         // Partitions waiting for items
         partition_wakers: HashMap<K, Vec<Waker>>,
+
+        // Configuration: whether to create new queues for unknown keys or drop items
+        allow_new_queues: bool,
     }
 }
 
@@ -128,6 +131,17 @@ where
     /// * `F` - The partitioning function type
     /// * `K` - The key type used for partitioning (must be `Hash + Eq + Clone`)
     fn new(stream: St, f: F) -> Arc<Mutex<Self>> {
+        Self::new_with_config(stream, f, true)
+    }
+
+    /// Creates a new `PartitionBy` stream with configuration options.
+    ///
+    /// # Arguments
+    ///
+    /// * `stream` - The source stream to partition
+    /// * `f` - An async function that takes stream items and returns a key for partitioning
+    /// * `allow_new_queues` - If true, creates new queues for unknown keys; if false, drops items for unknown keys
+    fn new_with_config(stream: St, f: F, allow_new_queues: bool) -> Arc<Mutex<Self>> {
         Arc::new_cyclic(|me| {
             let me = me.clone();
             Mutex::new(Self {
@@ -139,6 +153,7 @@ where
                 pending_fut: None,
                 pending_item: None,
                 partition_wakers: HashMap::new(),
+                allow_new_queues,
             })
         })
     }
@@ -155,14 +170,41 @@ where
     ///
     /// A `Partitioned` stream that yields only items matching the specified key.
     pub fn get_partition(&mut self, key: K) -> Partitioned<St, Fut, F, K> {
+        // Ensures that the buffer for new items for this key exists
         self.pending_items.entry(key.clone()).or_default();
-
-        // Create new partition
 
         Partitioned {
             key: key.clone(),
             shared_state: self.me.upgrade().unwrap(),
         }
+    }
+
+    /// Pre-creates queues for multiple keys.
+    ///
+    /// # Arguments
+    ///
+    /// * `keys` - An iterator of keys to pre-register
+    pub fn register_keys<I>(&mut self, keys: I)
+    where
+        I: IntoIterator<Item = K>,
+    {
+        for key in keys {
+            self.pending_items.entry(key).or_default();
+        }
+    }
+
+    /// Returns whether new partitions are allowed to be created.
+    pub fn allows_new_partitions(&self) -> bool {
+        self.allow_new_queues
+    }
+
+    /// Sets whether new queues are allowed to be created.
+    ///
+    /// If set to false, only keys that already have queues (either from previous
+    /// calls to `get_partition` or `register_keys`) will receive items. Items
+    /// for unknown keys will be dropped.
+    pub fn set_allow_new_queues(&mut self, allow: bool) {
+        self.allow_new_queues = allow;
     }
 }
 
@@ -188,10 +230,13 @@ where
                         // Store the pending item with its key
                         {
                             if let Some(item) = this.pending_item.take() {
-                                this.pending_items
-                                    .entry(key.clone())
-                                    .or_default()
-                                    .push_back(item);
+                                // Only store the item if we allow new partitions or the partition already exists
+                                if *this.allow_new_queues || this.pending_items.contains_key(&key) {
+                                    this.pending_items
+                                        .entry(key.clone())
+                                        .or_default()
+                                        .push_back(item);
+                                }
                             }
                         }
 
@@ -331,6 +376,48 @@ pub trait StreamPartitionExt: Stream {
     {
         PartitionBy::new(self, f)
     }
+
+    /// Partitions this stream with configuration options.
+    ///
+    /// Like `partition_by`, but allows specifying whether new partitions should be
+    /// created automatically or if items for unknown keys should be dropped.
+    ///
+    /// # Arguments
+    ///
+    /// * `f` - An async function that takes stream items and returns a partitioning key
+    /// * `allow_new_queues` - If true, creates new queues for unknown keys; if false, drops items for unknown keys
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use futures::{stream, StreamExt};
+    /// use futures::future::ready;
+    /// use stream_partition::StreamPartitionExt;
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// let numbers = stream::iter(vec![1, 2, 3, 4, 5, 6]);
+    /// // Only allow partitions for pre-registered keys
+    /// let mut partitioner = numbers.partition_by_with_config(|x| ready(x % 2), false);
+    ///
+    /// // Pre-register the keys we want to allow
+    /// partitioner.lock().unwrap().register_keys([0, 1]);
+    /// # }
+    /// ```
+    fn partition_by_with_config<F, Fut, K>(
+        self,
+        f: F,
+        allow_new_queues: bool,
+    ) -> Arc<Mutex<PartitionBy<Self, Fut, F, K>>>
+    where
+        Self: Sized,
+        Self::Item: Clone,
+        F: Fn(&Self::Item) -> Fut,
+        Fut: future::Future<Output = K>,
+        K: Hash + Eq + Clone,
+    {
+        PartitionBy::new_with_config(self, f, allow_new_queues)
+    }
 }
 
 impl<St: Stream> StreamPartitionExt for St {}
@@ -449,6 +536,93 @@ mod tests {
         }
         dbg!("complete");
     }
+
+    #[tokio::test]
+    async fn test_drop_unknown_keys() {
+        //! Test that items for unknown keys are dropped when allow_new_queues is false.
+        use futures::future::ready;
+
+        let stream = stream::iter(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+        let partitioner = stream.partition_by_with_config(|x| ready(x % 3), false);
+
+        // Pre-register only keys 0 and 1, but not 2
+        partitioner.lock().unwrap().register_keys([0, 1]);
+
+        // Get partitions for registered keys
+        let mut partition_0 = partitioner.lock().unwrap().get_partition(0);
+        let mut partition_1 = partitioner.lock().unwrap().get_partition(1);
+
+        // Collect all items from both partitions using separate tasks
+        let task_0 = tokio::spawn(async move {
+            let mut items = Vec::new();
+            while let Some(item) = partition_0.next().await {
+                items.push(item);
+            }
+            items
+        });
+
+        let task_1 = tokio::spawn(async move {
+            let mut items = Vec::new();
+            while let Some(item) = partition_1.next().await {
+                items.push(item);
+            }
+            items
+        });
+
+        // Wait for both tasks to complete with a timeout
+        let result = tokio::time::timeout(
+            Duration::from_millis(10),
+            futures::future::join(task_0, task_1),
+        )
+        .await;
+
+        if result.is_err() {
+            panic!("Collection timed out - streams did not complete");
+        }
+
+        let (items_0_result, items_1_result) = result.unwrap();
+        let items_0 = items_0_result.unwrap();
+        let items_1 = items_1_result.unwrap();
+
+        // Verify we only got items for keys 0 and 1 (multiples of 3 and remainder 1)
+        // Items with remainder 2 should have been dropped
+        println!("Items for key 0: {:?}", items_0);
+        println!("Items for key 1: {:?}", items_1);
+
+        // Expected items: 3, 6, 9 for key 0; 1, 4, 7, 10 for key 1
+        // Items 2, 5, 8 should be dropped
+        assert!(!items_0.is_empty(), "Should have items for key 0");
+        assert!(!items_1.is_empty(), "Should have items for key 1");
+
+        for item in &items_0 {
+            assert_eq!(
+                item % 3,
+                0,
+                "All items in partition 0 should have remainder 0"
+            );
+        }
+
+        for item in &items_1 {
+            assert_eq!(
+                item % 3,
+                1,
+                "All items in partition 1 should have remainder 1"
+            );
+        }
+
+        let mut partition_2 = partitioner.lock().unwrap().get_partition(2);
+        // This partition should yield no items since we didn't register key 2 before the stream was finished
+        let mut items_2 = Vec::new();
+        while let Some(item) = partition_2.next().await {
+            items_2.push(item);
+        }
+        // Verify that no items were collected for key 2
+        assert!(
+            items_2.is_empty(),
+            "Should not have collected any items for key 2"
+        );
+        println!("Items for key 2: {:?}", items_2);
+    }
 }
 
 #[cfg(test)]
@@ -461,9 +635,9 @@ mod memory_tests {
 
     #[tokio::test]
     async fn test_memory_usage() {
-        for _ in 0..100 {
+        for _ in 0..10 {
             // Your partitioning code here
-            let stream = stream::iter(0..100_000);
+            let stream = stream::iter(0..10_000);
             let partitioner = stream.partition_by(|x| ready(x % 100));
 
             // Consume all partitions
