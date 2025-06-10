@@ -2,6 +2,15 @@
 name = "stream-partition"
 version = "0.1.0"
 edition = "2024"
+authors = ["Jade Ellis <jade@ellis.link>"]
+description = "Partition a single stream into multiple sub-streams based on a key"
+readme = "README.md"
+homepage = "https://github.com/JadedBlueEyes/stream-partition"
+repository = "https://github.com/JadedBlueEyes/stream-partition"
+license = "MIT OR Apache-2.0"
+keywords = ["stream", "partition", "async", "futures", "split"]
+categories = ["asynchronous"]
+rust-version = "1.85" # 2024 edition, tested as of 10 Jun 2025
 
 [dependencies]
 futures = { version = "0.3.31", default-features = false, features = ["std"]}
