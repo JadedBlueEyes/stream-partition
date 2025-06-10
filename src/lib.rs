@@ -287,7 +287,7 @@ where
     }
 }
 
-// Do we nee unpin here? see pinarcmutex crate
+// Do we need unpin here? see pinarcmutex crate
 
 impl<St, Fut, F, K> Stream for Partitioned<St, Fut, F, K>
 where
